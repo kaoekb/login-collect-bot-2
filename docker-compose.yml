@@ -1,0 +1,10 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: login-collect-bot-2:latest
+    container_name: login-collect-bot-2
+    env_file:
+      - .env
+    restart: unless-stopped
