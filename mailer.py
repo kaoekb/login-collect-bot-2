@@ -1,7 +1,36 @@
 import smtplib
+import socket
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from platform import python_version
+
+
+class IPv4SMTP(smtplib.SMTP):
+    def _get_socket(self, host: str, port: int, timeout: float):  # type: ignore[override]
+        last_error: OSError | None = None
+        for family, socktype, proto, _, sockaddr in socket.getaddrinfo(
+            host,
+            port,
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        ):
+            sock = None
+            try:
+                sock = socket.socket(family, socktype, proto)
+                if timeout is not None:
+                    sock.settimeout(timeout)
+                if self.source_address:
+                    sock.bind(self.source_address)
+                sock.connect(sockaddr)
+                return sock
+            except OSError as exc:
+                last_error = exc
+                if sock is not None:
+                    sock.close()
+
+        if last_error is not None:
+            raise last_error
+        raise OSError(f"No IPv4 address available for {host}:{port}")
 
 
 class Mailer:
@@ -36,18 +65,42 @@ class Mailer:
         msg.attach(MIMEText(html, "html"))
 
         try:
-            with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=20) as server:
-                if self.smtp_use_tls:
-                    server.starttls()
-                server.login(self.sender_email, self.sender_password)
-                server.sendmail(self.sender_email, recipient_email, msg.as_string())
+            self._send_message(msg, recipient_email, smtp_cls=smtplib.SMTP)
             return True, "OK"
+        except OSError as exc:
+            if not self._should_retry_with_ipv4(exc):
+                return False, f"SMTP_NETWORK_ERROR:{exc}"
+
+            try:
+                self._send_message(msg, recipient_email, smtp_cls=IPv4SMTP)
+                return True, "OK"
+            except smtplib.SMTPAuthenticationError as retry_exc:
+                return False, f"SMTP_AUTH_ERROR:{retry_exc.smtp_code}"
+            except smtplib.SMTPException as retry_exc:
+                return False, f"SMTP_ERROR:{retry_exc}"
+            except OSError as retry_exc:
+                return False, f"SMTP_NETWORK_ERROR:{retry_exc}"
         except smtplib.SMTPAuthenticationError as exc:
             return False, f"SMTP_AUTH_ERROR:{exc.smtp_code}"
         except smtplib.SMTPException as exc:
             return False, f"SMTP_ERROR:{exc}"
-        except OSError as exc:
-            return False, f"SMTP_NETWORK_ERROR:{exc}"
+
+    def _send_message(
+        self,
+        msg: MIMEMultipart,
+        recipient_email: str,
+        smtp_cls: type[smtplib.SMTP],
+    ) -> None:
+        with smtp_cls(self.smtp_host, self.smtp_port, timeout=20) as server:
+            if self.smtp_use_tls:
+                server.starttls()
+            server.login(self.sender_email, self.sender_password)
+            server.sendmail(self.sender_email, recipient_email, msg.as_string())
+
+    @staticmethod
+    def _should_retry_with_ipv4(exc: OSError) -> bool:
+        message = str(exc).lower()
+        return exc.errno == 101 or "network is unreachable" in message or "timed out" in message
 
     @staticmethod
     def _build_html(pin: str) -> str:
