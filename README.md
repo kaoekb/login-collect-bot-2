@@ -5,11 +5,9 @@
 ## Что улучшено
 
 - Разделение на модули: `bot.py`, `config.py`, `db.py`, `mailer.py`.
-- Улучшенная регистрация:
+- Упрощенная регистрация:
   - ввод школьного логина;
-  - отправка PIN на `@student.21-school.ru`;
-  - подтверждение PIN с TTL (по умолчанию 5 минут);
-  - повторная отправка PIN через кнопку.
+  - привязка Telegram username без подтверждения по email.
 - Админка в Telegram через `/admin`:
   - статистика;
   - экспорт пользователей в Excel;
@@ -45,9 +43,7 @@
    - `BOT_TOKEN`
    - `MONGO_URI`
    - `ADMIN_IDS`
-   - `sender` и `mail_password` (для отправки PIN)
-   - при необходимости SMTP:
-     `SMTP_HOST`, `SMTP_PORT`, `SMTP_USE_TLS`
+   - `sender`, `mail_password`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USE_TLS` не нужны, пока email-подтверждение отключено
    - тестовая пересылка сообщений через бота: `ENABLE_RELAY_TEST=true`
    - лимит длины relay-сообщения: `RELAY_MAX_LEN=700`
 

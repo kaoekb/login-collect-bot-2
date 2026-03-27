@@ -1,7 +1,6 @@
 import html
 import logging
 import os
-import random
 import re
 import time
 from collections.abc import Callable
@@ -16,15 +15,10 @@ from telebot.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 
 from config import Settings
 from db import MongoRepository
-from mailer import Mailer
-
-
 STATE_WAITING_LOGIN = "waiting_login"
-STATE_WAITING_PIN = "waiting_pin"
 STATE_ADMIN_FIND = "admin_find"
 STATE_RELAY_MESSAGE = "relay_message"
 
-PIN_HINT = "Код состоит из 4 цифр и действует 5 минут."
 PEER_LOOKUP_PROMPT = "Введи школьный или телеграм ник интересующего тебя пира."
 POLLING_CONFLICT_DELAY_SECONDS = 30
 
@@ -69,14 +63,6 @@ legacy_migrated = repo.migrate_legacy_users()
 if legacy_migrated:
     logger.info("Legacy users migrated: %s", legacy_migrated)
 
-mailer = Mailer(
-    settings.sender_email,
-    settings.sender_password,
-    settings.smtp_host,
-    settings.smtp_port,
-    settings.smtp_use_tls,
-)
-
 user_states: dict[int, str] = {}
 user_payloads: dict[int, dict[str, Any]] = {}
 
@@ -91,11 +77,6 @@ def is_valid_school_login(login: str) -> bool:
 
 def is_admin(user_id: int) -> bool:
     return user_id in settings.admin_ids
-
-
-def generate_pin() -> str:
-    return "".join(str(random.randint(0, 9)) for _ in range(settings.pin_length))
-
 
 def clear_state(user_id: int) -> None:
     user_states.pop(user_id, None)
@@ -316,68 +297,18 @@ def handle_school_login_input(message: types.Message, login_raw: str) -> None:
         )
         return
 
-    pin = generate_pin()
-    sent, status = mailer.send_pin(login_school, pin)
-    if not sent:
-        logger.error("PIN email send error: %s", status)
-        send_message_safe(chat_id, "Не удалось отправить письмо. Попробуйте позже.")
-        return
-
-    repo.set_pending_registration(
+    repo.register_user(
         user_id=user_id,
         login_school=login_school,
         login_tg=login_tg,
-        pin=pin,
-        pin_ttl_seconds=settings.pin_ttl_seconds,
     )
-    set_state(user_id, STATE_WAITING_PIN, {"pending_login_school": login_school})
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("Отправить код повторно", callback_data="reg:resend"))
+    clear_state(user_id)
     send_message_safe(
         chat_id,
-        f"Код подтверждения отправлен на {login_school}@student.21-school.ru.\n"
-        f"Введите код в этот чат.\n{PIN_HINT}",
-        reply_markup=kb,
+        "Регистрация завершена. Подтверждение через email временно отключено.\n"
+        "Теперь можете искать пользователей по нику.",
     )
-
-
-def handle_pin_input(message: types.Message, pin_raw: str) -> None:
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    pin = pin_raw.strip()
-
-    if not pin.isdigit() or len(pin) != settings.pin_length:
-        send_message_safe(chat_id, f"Неверный формат кода. {PIN_HINT}")
-        return
-
-    login_tg = (message.from_user.username or "").strip().lower()
-    if not login_tg:
-        send_message_safe(
-            chat_id,
-            "У вас отсутствует username в Telegram. Добавьте его в настройках и начните регистрацию заново: /start",
-        )
-        return
-
-    status = repo.verify_pin(user_id=user_id, entered_pin=pin, current_login_tg=login_tg)
-    if status == "ok":
-        clear_state(user_id)
-        send_message_safe(chat_id, "Регистрация подтверждена. Теперь можете искать пользователей по нику.")
-        send_peer_lookup_prompt(chat_id)
-        return
-
-    if status == "expired":
-        repo.clear_pending_registration(user_id)
-        clear_state(user_id)
-        send_message_safe(chat_id, "Срок действия кода истек. Начните заново: /start")
-        return
-
-    if status == "invalid":
-        send_message_safe(chat_id, "Неверный код. Попробуйте еще раз.")
-        return
-
-    clear_state(user_id)
-    send_message_safe(chat_id, "Нет активной регистрации. Используйте /start")
+    send_peer_lookup_prompt(chat_id)
 
 
 def send_stats(chat_id: int) -> None:
@@ -607,30 +538,7 @@ def callback_router(call: types.CallbackQuery) -> None:
         return
 
     if data == "reg:resend":
-        user = repo.get_user(user_id) or {}
-        pending_login_school = user.get("pending_login_school")
-        if not pending_login_school:
-            answer_callback_query_safe(call.id, "Нет активной регистрации.")
-            return
-
-        answer_callback_query_safe(call.id, "Отправляю код...")
-        pin = generate_pin()
-        sent, status = mailer.send_pin(pending_login_school, pin)
-        if not sent:
-            logger.error("PIN resend error: %s", status)
-            send_message_safe(chat_id, "Не удалось отправить письмо. Попробуйте позже.")
-            return
-
-        login_tg = (call.from_user.username or "").strip().lower()
-        repo.set_pending_registration(
-            user_id=user_id,
-            login_school=pending_login_school,
-            login_tg=login_tg,
-            pin=pin,
-            pin_ttl_seconds=settings.pin_ttl_seconds,
-        )
-        set_state(user_id, STATE_WAITING_PIN, {"pending_login_school": pending_login_school})
-        send_message_safe(chat_id, f"Новый код отправлен на {pending_login_school}@student.21-school.ru.")
+        answer_callback_query_safe(call.id, "Подтверждение через email временно отключено.")
         return
 
     if data.startswith("relay:"):
@@ -770,9 +678,6 @@ def private_text_router(message: types.Message) -> None:
     state = user_states.get(user_id)
     if state == STATE_WAITING_LOGIN:
         handle_school_login_input(message, text)
-        return
-    if state == STATE_WAITING_PIN:
-        handle_pin_input(message, text)
         return
     if state == STATE_ADMIN_FIND:
         if not is_admin(user_id):

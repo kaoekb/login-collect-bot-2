@@ -153,6 +153,36 @@ class MongoRepository:
             upsert=True,
         )
 
+    def register_user(self, user_id: int, login_school: str, login_tg: str) -> None:
+        user = self.get_user(user_id) or {}
+        now = _utc_now()
+        was_verified = bool(user.get("verified"))
+        self.users.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "login_school": login_school,
+                    "login_tg": login_tg,
+                    "verified": True,
+                    "registration_status": "verified",
+                    "updated_at": now,
+                    "registered_at": user.get("registered_at") or now,
+                },
+                "$unset": {
+                    "pending_pin": "",
+                    "pending_pin_expires_at": "",
+                    "pending_login_school": "",
+                },
+                "$setOnInsert": {
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+
+        if not was_verified:
+            self.increment_new_users()
+
     def verify_pin(self, user_id: int, entered_pin: str, current_login_tg: str) -> str:
         user = self.get_user(user_id)
         now = _utc_now()
